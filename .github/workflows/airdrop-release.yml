@@ -1,0 +1,60 @@
+name: Release airdrop
+
+on:
+  push:
+    tags:
+      - "airdrop-v[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v6
+
+      - name: Validate the release tag
+        id: version
+        shell: bash
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^airdrop-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            echo "Release tags must use airdrop-vMAJOR.MINOR.PATCH." >&2
+            exit 1
+          fi
+          echo "number=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and test the universal binary
+        run: |
+          make -C airdrop universal
+          sh airdrop/Tests/smoke-test.sh "$(pwd)/airdrop/build/airdrop"
+
+      - name: Package the Homebrew release asset
+        env:
+          VERSION: ${{ steps.version.outputs.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="airdrop-${VERSION}-macos-universal.tar.gz"
+
+          mkdir -p dist
+          tar -C airdrop/build -czf "dist/${archive}" airdrop
+          cd dist
+          shasum -a 256 "${archive}" > "${archive}.sha256"
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --generate-notes \
+              --title "airdrop v${{ steps.version.outputs.number }}" \
+              --verify-tag
+          fi
