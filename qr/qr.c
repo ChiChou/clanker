@@ -28,6 +28,10 @@
 
 #include "qrcodegen.h"
 
+#ifndef QR_VERSION
+#define QR_VERSION "dev"
+#endif
+
 /* ---------- CRC32 (PNG) ---------- */
 static uint32_t crc32_update(uint32_t crc, const uint8_t *data, size_t len) {
     static uint32_t table[256];
@@ -233,6 +237,12 @@ int main(int argc, char **argv) {
     /* keep CRLF translation from mangling piped input and escape output */
     _setmode(_fileno(stdout), _O_BINARY);
 #endif
+    if (argc == 2 &&
+        (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)) {
+        puts("qr " QR_VERSION);
+        return 0;
+    }
+
     const char *text;
     size_t len;
     if (argc > 1) {

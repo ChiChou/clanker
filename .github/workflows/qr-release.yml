@@ -1,0 +1,125 @@
+name: Build and release qr
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "qr-v[0-9]*.[0-9]*.[0-9]*"
+    paths:
+      - "qr/**"
+      - ".github/workflows/qr-release.yml"
+  pull_request:
+    paths:
+      - "qr/**"
+      - ".github/workflows/qr-release.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-15
+            target: macos-universal
+          - os: ubuntu-24.04
+            target: linux-x86_64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v6
+
+      - name: Validate the release tag
+        id: version
+        shell: bash
+        run: |
+          version="$(<qr/VERSION)"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            if [[ ! "${GITHUB_REF_NAME}" =~ ^qr-v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+              echo "Release tags must use qr-vMAJOR.MINOR.PATCH." >&2
+              exit 1
+            fi
+            if [[ "${version}" != "${BASH_REMATCH[1]}" ]]; then
+              echo "qr/VERSION must match the release tag (${BASH_REMATCH[1]})." >&2
+              exit 1
+            fi
+          fi
+          echo "number=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure the build
+        env:
+          VERSION: ${{ steps.version.outputs.number }}
+        shell: bash
+        run: |
+          args=(-S qr -B build/qr -DCMAKE_BUILD_TYPE=Release -DQR_VERSION="${VERSION}")
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            args+=("-DCMAKE_OSX_ARCHITECTURES=arm64;x86_64")
+          fi
+          cmake "${args[@]}"
+
+      - name: Build and test
+        run: |
+          cmake --build build/qr --config Release --parallel
+          ctest --test-dir build/qr -C Release --output-on-failure
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            lipo build/qr/qr -verify_arch arm64
+            lipo build/qr/qr -verify_arch x86_64
+          fi
+
+      - name: Package the release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.version.outputs.number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="qr-${VERSION}-${TARGET}.tar.gz"
+
+          mkdir -p dist
+          tar -C build/qr -czf "dist/${archive}" qr
+          cd dist
+          sha256sum "${archive}" > "${archive}.sha256" 2>/dev/null || \
+            shasum -a 256 "${archive}" > "${archive}.sha256"
+
+      - name: Upload the release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: qr-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download the release assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: qr-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --generate-notes \
+              --title "qr v${GITHUB_REF_NAME#qr-v}" \
+              --verify-tag
+          fi
